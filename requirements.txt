@@ -6,3 +6,4 @@ seaborn
 matplotlib
 python-dotenv
 pytest
+jupyterlab
