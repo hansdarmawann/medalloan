@@ -19,7 +19,7 @@ The eight dataset parts are stored in `data/` as `loan_data_01.csv` through `loa
 ## Current architecture
 
 ```text
-CSV sumber -> Bronze -> Silver -> Gold -> Control / Quarantine / BI
+CSV -> Bronze -> Silver -> Gold -> Control / Quarantine / BI
 ```
 
 The pipeline provides `full`, `append`, `upsert`, and `snapshot` ingestion; contract validation, `Loan_ID` deduplication, snapshot-diff CDC, quality checks, operational metrics, and a DAG runner with retries, timeouts, and resource pools. Gold contains applicant-profile, property-area, and loan-status dimensions, an application fact table, and an approval summary.
