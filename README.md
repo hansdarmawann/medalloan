@@ -1,10 +1,10 @@
 # Medalloan PostgreSQL Data Warehouse
 
-Medalloan adalah proyek pembelajaran data engineering untuk memuat data CSV ke PostgreSQL dengan pola medallion: Bronze, Silver, dan Gold, disertai kontrol kualitas, metadata operasional, dan orkestrasi sederhana.
+Medalloan is a learning-focused data engineering project for loading CSV data into PostgreSQL using the medallion pattern: Bronze, Silver, and Gold, with quality controls, operational metadata, and lightweight orchestration.
 
 ## Dataset
 
-Dataset yang tersedia adalah [`data/archived/loan_data.csv`](data/archived/loan_data.csv), berisi **381 baris dan 13 kolom** data pengajuan pinjaman:
+The available dataset is [`data/archived/loan_data.csv`](data/archived/loan_data.csv), containing **381 rows and 13 columns** of loan application data:
 
 ```text
 Loan_ID, Gender, Married, Dependents, Education, Self_Employed,
@@ -12,39 +12,32 @@ ApplicantIncome, CoapplicantIncome, LoanAmount, Loan_Amount_Term,
 Credit_History, Property_Area, Loan_Status
 ```
 
-Kolom numerik meliputi `ApplicantIncome`, `CoapplicantIncome`, `LoanAmount`, dan `Loan_Amount_Term`. `Credit_History` bersifat numerik/biner, sedangkan `Loan_Status` berisi target persetujuan (`Y`/`N`). Nilai kosong terdapat pada `Gender` (5), `Dependents` (8), `Self_Employed` (21), `Loan_Amount_Term` (11), dan `Credit_History` (30).
+Numeric columns include `ApplicantIncome`, `CoapplicantIncome`, `LoanAmount`, and `Loan_Amount_Term`. `Credit_History` is numeric/binary, while `Loan_Status` contains the approval target (`Y`/`N`). Missing values occur in `Gender` (5), `Dependents` (8), `Self_Employed` (21), `Loan_Amount_Term` (11), and `Credit_History` (30).
 
-File berada di folder `archived` dan **belum menjadi input default pipeline**. Pipeline masih mengimplementasikan kontrak Superstore berikut:
+The eight dataset parts are stored in `data/` as `loan_data_01.csv` through `loan_data_08.csv`. The pipeline reads all of them automatically; the original `data/archived/loan_data.csv` file is retained as an archive.
 
-```text
-Row ID, Order ID, Order Date, Ship Date, Customer ID,
-Product ID, Sales, Quantity, Discount, Profit
-```
-
-Karena itu, `loan_data.csv` tidak dapat langsung dijalankan tanpa perubahan kontrak, transformasi, dan model Gold.
-
-## Arsitektur saat ini
+## Current architecture
 
 ```text
 CSV sumber -> Bronze -> Silver -> Gold -> Control / Quarantine / BI
 ```
 
-Pipeline menyediakan ingestion `full`, `append`, `upsert`, dan `snapshot`; validasi kontrak, deduplikasi, watermark, replay, snapshot-diff CDC; dimensional modeling Superstore; quality score, SLA, lineage, audit, governance; serta DAG runner dengan retry, timeout, dan resource pool.
+The pipeline provides `full`, `append`, `upsert`, and `snapshot` ingestion; contract validation, `Loan_ID` deduplication, snapshot-diff CDC, quality checks, operational metrics, and a DAG runner with retries, timeouts, and resource pools. Gold contains applicant-profile, property-area, and loan-status dimensions, an application fact table, and an approval summary.
 
-## Struktur repository
+## Repository structure
 
 ```text
-data/archived/loan_data.csv     # Dataset pinjaman terbaru
-scripts/create_database.py      # Membuat database jika belum ada
-scripts/run_pipeline.py         # Menjalankan pipeline
-scripts/run_orchestrator.py     # Menjalankan DAG sederhana
-src/retailion/                  # Kode pipeline dan konfigurasi
-tests/                          # Test kontrak dan orchestrator
+data/archived/loan_data.csv     # Archived source dataset
+scripts/create_database.py      # Create the database if missing
+scripts/run_pipeline.py         # Run the pipeline
+scripts/run_orchestrator.py     # Run the lightweight DAG
+src/retailion/                  # Pipeline and configuration code
+tests/                          # Contract and orchestrator tests
 ```
 
 ## Quick start
 
-Prasyarat: Python 3.10+, PostgreSQL yang berjalan, dan akun dengan izin membuat schema, tabel, view, index, serta extension `pgcrypto`.
+Prerequisites: Python 3.10+, a running PostgreSQL instance, and an account allowed to create schemas, tables, views, indexes, and the `pgcrypto` extension.
 
 ```powershell
 python -m venv .venv
@@ -54,31 +47,27 @@ Copy-Item .env.example .env
 python scripts/create_database.py
 ```
 
-Isi `.env` dengan `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, dan `DB_PASSWORD`, lalu jalankan:
+Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in `.env`, then run:
 
 ```powershell
 python scripts/run_pipeline.py
 ```
 
-Perintah tersebut masih menggunakan default input Superstore yang dirujuk kode. Dataset pinjaman belum kompatibel dan perintah berikut akan gagal pada validasi kontrak:
+This command processes all eight `data/loan_data_*.csv` files. To run only one dataset part, provide its file path explicitly:
 
 ```powershell
-python scripts/run_pipeline.py --source data/archived/loan_data.csv
+python scripts/run_pipeline.py --source data/loan_data_01.csv
 ```
 
-## Pengembangan dataset pinjaman
-
-Untuk menjadikan dataset baru sebagai sumber utama, perlu dilakukan: mengganti `REQUIRED_SOURCE_COLUMNS`, menangani null dan tipe data, membangun Silver dengan grain `Loan_ID`, mendesain fact/dimensi pinjaman, memperbarui aturan kualitas, lineage, query, default path script, dan test kontraknya.
-
-## Pengujian
+## Testing
 
 ```powershell
 python -m pip install pytest
 python -m pytest -q
 ```
 
-Test saat ini memverifikasi kontrak Superstore dan perilaku retry orchestrator; dataset pinjaman belum diuji oleh pipeline.
+Tests verify the loan dataset contract and orchestrator retry behavior. Run the pipeline against PostgreSQL to validate the complete Bronze, Silver, and Gold transformations.
 
-## Catatan penggunaan dataset
+## Dataset usage notes
 
-Dataset pinjaman disimpan sebagai data arsip. Periksa sumber dan ketentuan penggunaannya sebelum redistribusi atau pemakaian di luar pembelajaran. Repository ini belum menyertakan file lisensi perangkat lunak.
+The loan dataset is retained as archived data. Review its source and usage terms before redistribution or use beyond learning purposes. This repository does not currently include a software license file.

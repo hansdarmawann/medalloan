@@ -14,4 +14,4 @@ def test_source_contract_accepts_required_columns():
 
 def test_source_contract_rejects_missing_columns():
     with pytest.raises(ValueError, match="missing columns"):
-        validate_source_schema(REQUIRED_SOURCE_COLUMNS - {"Profit"})
+        validate_source_schema(REQUIRED_SOURCE_COLUMNS - {"Loan_Status"})

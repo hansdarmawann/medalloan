@@ -1,4 +1,4 @@
-"""Run the Retailion DAG from a manual, scheduled, or event trigger."""
+"""Run the Medalloan DAG from a manual, scheduled, or event trigger."""
 
 import argparse
 import logging
@@ -15,7 +15,7 @@ from retailion.pipeline import run  # noqa: E402
 
 def build_dag(args) -> DAG:
     dag = DAG(
-        name="retailion_superstore",
+        name="medalloan_loan_applications",
         schedule=args.schedule,
         event_triggers={"source_updated", "backfill_requested"},
         max_concurrency=1,
@@ -48,8 +48,9 @@ def build_dag(args) -> DAG:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the Retailion orchestration DAG")
-    parser.add_argument("--source", type=Path, default=ROOT / "data" / "Sample - Superstore.csv")
+    parser = argparse.ArgumentParser(description="Run the Medalloan orchestration DAG")
+    parser.add_argument("--source", type=Path, default=ROOT / "data",
+                        help="A loan CSV file or directory containing loan_data_*.csv files")
     parser.add_argument("--mode", choices=("full", "append", "upsert", "snapshot"), default="full")
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
@@ -68,7 +69,7 @@ def main() -> int:
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     build_dag(args).run(args.trigger)
-    logging.info("DAG completed: retailion_superstore")
+    logging.info("DAG completed: medalloan_loan_applications")
     return 0
 
 

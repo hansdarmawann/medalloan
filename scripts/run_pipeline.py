@@ -11,10 +11,11 @@ from retailion.pipeline import PipelineError, run  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the Retailion warehouse pipeline")
-    parser.add_argument("--source", type=Path, default=ROOT / "data" / "Sample - Superstore.csv")
-    parser.add_argument("--start-date", help="Optional inclusive order date filter (YYYY-MM-DD)")
-    parser.add_argument("--end-date", help="Optional inclusive order date filter (YYYY-MM-DD)")
+    parser = argparse.ArgumentParser(description="Run the Medalloan loan warehouse pipeline")
+    parser.add_argument("--source", type=Path, default=ROOT / "data",
+                        help="A loan CSV file or directory containing loan_data_*.csv files")
+    parser.add_argument("--start-date", help="Retained for compatibility; loan data has no event date")
+    parser.add_argument("--end-date", help="Retained for compatibility; loan data has no event date")
     parser.add_argument(
         "--replay", action="store_true",
         help="Explicitly run a bounded replay/backfill window without advancing the watermark",
