@@ -35,38 +35,136 @@ src/retailion/                  # Pipeline and configuration code
 tests/                          # Contract and orchestrator tests
 ```
 
-## Quick start
+## How to run
 
-Prerequisites: Python 3.10+, a running PostgreSQL instance, and an account allowed to create schemas, tables, views, indexes, and the `pgcrypto` extension.
+### Prerequisites
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+Install Anaconda or Miniconda, and make sure PostgreSQL is running. The PostgreSQL user must be allowed to create databases, schemas, tables, views, indexes, and the `pgcrypto` extension.
+
+The commands below use Windows CMD.
+
+### 1. Create the Conda environment
+
+Run these commands from the repository root:
+
+```cmd
+conda create -n medalloan python=3.10 -y
+conda activate medalloan
 python -m pip install -r requirements.txt
-Copy-Item .env.example .env
-python scripts/create_database.py
 ```
 
-Set `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and `DB_PASSWORD` in `.env`, then run:
+Check that the environment and dependencies are available:
 
-```powershell
-python scripts/run_pipeline.py
+```cmd
+conda env list
+python --version
+python -m pip show pandas sqlalchemy pytest
 ```
 
-This command processes all eight `data/loan_data_*.csv` files. To run only one dataset part, provide its file path explicitly:
+### 2. Configure the database
 
-```powershell
-python scripts/run_pipeline.py --source data/loan_data_01.csv
+Create the environment file:
+
+```cmd
+copy .env.example .env
 ```
 
-## Testing
+Open `.env` and set the PostgreSQL values:
 
-```powershell
-python -m pip install pytest
-python -m pytest -q
+```dotenv
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=medalloan
+DB_USER=postgres
+DB_PASSWORD=your-password
 ```
 
-Tests verify the loan dataset contract and orchestrator retry behavior. Run the pipeline against PostgreSQL to validate the complete Bronze, Silver, and Gold transformations.
+Create the database if it does not exist:
+
+```cmd
+python scripts\create_database.py
+```
+
+### 3. Run the pipeline
+
+Run the complete pipeline. By default, it reads all eight files in `data/`:
+
+```cmd
+python scripts\run_pipeline.py
+```
+
+The input files are:
+
+```text
+data\loan_data_01.csv
+data\loan_data_02.csv
+data\loan_data_03.csv
+data\loan_data_04.csv
+data\loan_data_05.csv
+data\loan_data_06.csv
+data\loan_data_07.csv
+data\loan_data_08.csv
+```
+
+To run one CSV file only:
+
+```cmd
+python scripts\run_pipeline.py --source data\loan_data_01.csv
+```
+
+To view all available command options:
+
+```cmd
+python scripts\run_pipeline.py --help
+```
+
+### 4. Run the orchestrator
+
+Run the pipeline through the lightweight DAG orchestrator:
+
+```cmd
+python scripts\run_orchestrator.py
+```
+
+Test retry behavior by forcing the first attempt to fail:
+
+```cmd
+python scripts\run_orchestrator.py --inject-failure
+```
+
+### 5. Run the tests
+
+Run the unit tests:
+
+```cmd
+python -m pytest tests -p no:cacheprovider -q
+```
+
+Expected output:
+
+```text
+4 passed
+```
+
+The tests verify the loan dataset contract and orchestrator retry behavior. The full pipeline test requires a running PostgreSQL database.
+
+### 6. Verify the database output
+
+After a successful pipeline run, connect to PostgreSQL and check the generated tables:
+
+```sql
+SELECT status, bronze_rows, silver_rows, gold_rows
+FROM control.pipeline_runs
+ORDER BY started_at DESC
+LIMIT 5;
+
+SELECT COUNT(*) FROM bronze.loan_applications;
+SELECT COUNT(*) FROM silver.loan_applications;
+SELECT COUNT(*) FROM gold.fact_loan_applications;
+SELECT * FROM gold.loan_approval_summary;
+```
+
+The expected full-load row count is 381 records.
 
 ## Dataset usage notes
 
