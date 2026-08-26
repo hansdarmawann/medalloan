@@ -15,7 +15,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from .config import Settings
-from .database import create_db_engine
+from .database import create_db_engine, ensure_database_exists
 
 LOGGER = logging.getLogger(__name__)
 
@@ -319,6 +319,7 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
     if start_date or end_date or replay or overlap_days != 2:
         LOGGER.info("Date-window and watermark options are not used because loan data has no event date.")
     settings = Settings.from_env()
+    ensure_database_exists(settings)
     engine = create_db_engine(settings)
     run_id = new_run_id()
     started_at = datetime.now(timezone.utc)

@@ -12,8 +12,8 @@ from psycopg2 import sql  # noqa: E402
 from retailion.config import Settings  # noqa: E402
 
 
-def main() -> None:
-    settings = Settings.from_env()
+def create_database_if_missing(settings: Settings) -> None:
+    """Create the configured database using PostgreSQL's maintenance database."""
     connection = psycopg2.connect(
         host=settings.db_host,
         port=settings.db_port,
@@ -37,6 +37,10 @@ def main() -> None:
             print(f"Database created: {settings.db_name}")
     finally:
         connection.close()
+
+
+def main() -> None:
+    create_database_if_missing(Settings.from_env())
 
 
 if __name__ == "__main__":
