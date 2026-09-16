@@ -200,6 +200,17 @@ def run_bronze(engine, source_path: Path, load_mode: str = "full", run_id: str |
                     WHERE md5(row_to_json(current)::text) <> md5(row_to_json(incoming)::text)
                     ON CONFLICT DO NOTHING;
                 """), {"run_id": run_id})
+            if run_id and load_mode in {"full", "snapshot"}:
+                connection.execute(text(f"""
+                    INSERT INTO control.cdc_events (run_id, loan_id, operation)
+                    SELECT :run_id, current."Loan_ID", 'DELETE'
+                    FROM bronze.loan_applications current
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM bronze.{stage} incoming
+                        WHERE incoming."Loan_ID" = current."Loan_ID"
+                    )
+                    ON CONFLICT DO NOTHING;
+                """), {"run_id": run_id})
             if load_mode == "snapshot":
                 snapshot = frame.assign(snapshot_run_id=run_id, snapshot_at=datetime.now(timezone.utc))
                 snapshot.to_sql("loan_application_snapshots", engine, schema="bronze", if_exists="append", index=False)

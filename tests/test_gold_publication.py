@@ -310,6 +310,34 @@ def test_upsert_updates_existing_ids_and_inserts_new_ids(isolated_database, sour
         ]
 
 
+def test_snapshot_records_deleted_ids_and_removes_them_from_current_layers(
+    isolated_database, source_csv,
+):
+    pipeline.run(source_csv)
+    frame = pd.read_csv(source_csv)
+    deleted_id = frame.loc[0, "Loan_ID"]
+    frame.iloc[1:].to_csv(source_csv, index=False)
+
+    pipeline.run(source_csv, load_mode="snapshot")
+    snapshot_run = latest_run(isolated_database)
+    assert snapshot_run["status"] == "SUCCESS"
+    assert snapshot_run["bronze_rows"] == snapshot_run["silver_rows"] == snapshot_run["gold_rows"] == len(frame) - 1
+    with isolated_database.connect() as connection:
+        assert connection.execute(text("""
+            SELECT operation, loan_id FROM control.cdc_events
+            WHERE run_id = :run_id
+        """), {"run_id": snapshot_run["run_id"]}).all() == [("DELETE", deleted_id)]
+        assert connection.execute(text("""
+            SELECT COUNT(*) FROM bronze.loan_applications WHERE "Loan_ID" = :loan_id
+        """), {"loan_id": deleted_id}).scalar_one() == 0
+        assert connection.execute(text("""
+            SELECT COUNT(*) FROM silver.loan_applications WHERE loan_id = :loan_id
+        """), {"loan_id": deleted_id}).scalar_one() == 0
+        assert connection.execute(text("""
+            SELECT COUNT(*) FROM gold.fact_loan_applications WHERE loan_id = :loan_id
+        """), {"loan_id": deleted_id}).scalar_one() == 0
+
+
 def test_active_pipeline_lock_rejects_a_second_run_without_mutating_layers(
     isolated_database, source_csv,
 ):

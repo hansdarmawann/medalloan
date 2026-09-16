@@ -39,8 +39,11 @@ The pipeline provides `full`, `append`, `upsert`, and `snapshot` ingestion; cont
 
 CDC records only applied operations: append runs emit `INSERT` events for new
 IDs and no `UPDATE` events, while upsert runs emit both inserts and changed
-updates. The `bronze_rows` metric represents the resulting Bronze table size,
-which keeps it comparable with Silver and Gold row counts.
+updates. Full and snapshot runs also compare the prior current Bronze state and
+emit `DELETE` events for IDs absent from the incoming complete snapshot. Those
+rows are removed from current Bronze, Silver, and Gold on the same run. The
+`bronze_rows` metric represents the resulting Bronze table size, which keeps it
+comparable with Silver and Gold row counts.
 
 ### Gold publication and rollback
 
