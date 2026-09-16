@@ -102,6 +102,9 @@ def assert_no_staging(engine):
             SELECT COUNT(*) FROM information_schema.tables
             WHERE table_schema = 'bronze' AND table_name LIKE 'loan_applications_stage_%'
         """)).scalar_one() == 0
+        assert connection.execute(text("""
+            SELECT COUNT(*) FROM pg_namespace WHERE left(nspname, 12) = 'silver_stage_'
+        """)).scalar_one() == 0
 
 
 def assert_failed_without_metrics(engine):
@@ -202,7 +205,7 @@ def test_publication_failure_rolls_back_all_tables_and_success_metadata(
     injected = []
 
     def fail_after_statement(connection, cursor, statement, parameters, context, executemany):
-        during_move = statement.startswith("ALTER TABLE") and ".dim_property_area SET SCHEMA gold" in statement
+        during_move = "TRUNCATE TABLE gold." in statement
         after_success_update = "status = 'SUCCESS'" in statement
         if (failure_point == "during_move" and during_move) or (
             failure_point == "after_success_update" and after_success_update
@@ -335,7 +338,41 @@ def test_snapshot_records_deleted_ids_and_removes_them_from_current_layers(
         """), {"loan_id": deleted_id}).scalar_one() == 0
         assert connection.execute(text("""
             SELECT COUNT(*) FROM gold.fact_loan_applications WHERE loan_id = :loan_id
-        """), {"loan_id": deleted_id}).scalar_one() == 0
+            """), {"loan_id": deleted_id}).scalar_one() == 0
+
+
+def test_republication_preserves_serving_table_objects_and_dependent_view(
+    isolated_database, source_csv,
+):
+    pipeline.run(source_csv)
+    with isolated_database.begin() as connection:
+        connection.execute(text("""
+            CREATE VIEW gold.fact_loan_applications_view AS
+            SELECT loan_id, applicant_income FROM gold.fact_loan_applications;
+        """))
+        before_oids = dict(connection.execute(text("""
+            SELECT c.relname, c.oid
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname IN ('silver', 'gold')
+              AND c.relname IN ('loan_applications', 'fact_loan_applications')
+        """)).all())
+
+    frame = pd.read_csv(source_csv)
+    frame.loc[0, "ApplicantIncome"] += 100
+    frame.to_csv(source_csv, index=False)
+    pipeline.run(source_csv, load_mode="upsert")
+
+    with isolated_database.connect() as connection:
+        after_oids = dict(connection.execute(text("""
+            SELECT c.relname, c.oid
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname IN ('silver', 'gold')
+              AND c.relname IN ('loan_applications', 'fact_loan_applications')
+        """)).all())
+        assert after_oids == before_oids
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM gold.fact_loan_applications_view"
+        )).scalar_one() == len(frame)
 
 
 def test_active_pipeline_lock_rejects_a_second_run_without_mutating_layers(

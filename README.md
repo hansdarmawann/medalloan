@@ -68,10 +68,12 @@ checks and allow publication; invalid rows are still copied to quarantine by
 the Silver step, without being excluded from Gold. This change does not add
 row filtering or new NULL rules.
 
-Publication still replaces tables. External views or foreign keys depending on
-Gold can block replacement; the pipeline does not use `CASCADE`, and rolls back
-instead of removing those dependencies. Custom table grants are not preserved
-by replacement and must be managed separately.
+After the first publication, Silver and Gold keep the same table objects and
+refresh their rows with transactional `TRUNCATE` and `INSERT`. This preserves
+object IDs, views, grants, indexes, and constraints. External foreign keys can
+still block a truncate; the pipeline does not use `CASCADE`, and rolls back
+instead of removing those dependencies. A failed refresh restores the previous
+rows.
 
 ### Concurrent-run protection
 

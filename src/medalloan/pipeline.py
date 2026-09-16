@@ -251,46 +251,58 @@ def run_bronze(engine, source_path: Path, load_mode: str = "full", run_id: str |
 
 
 def run_silver(engine, run_id: str, source_file: str = "loan_data_parts") -> int:
-    sql = """
-        CREATE SCHEMA IF NOT EXISTS silver;
-        DROP TABLE IF EXISTS silver.loan_applications;
-        CREATE TABLE silver.loan_applications AS
-        SELECT DISTINCT ON ("Loan_ID")
-            TRIM("Loan_ID") AS loan_id,
-            NULLIF(TRIM("Gender"), '') AS gender,
-            NULLIF(TRIM("Married"), '') AS married,
-            NULLIF(TRIM("Dependents"), '') AS dependents,
-            NULLIF(TRIM("Education"), '') AS education,
-            NULLIF(TRIM("Self_Employed"), '') AS self_employed,
-            CAST("ApplicantIncome" AS NUMERIC(14,2)) AS applicant_income,
-            CAST("CoapplicantIncome" AS NUMERIC(14,2)) AS coapplicant_income,
-            CAST("LoanAmount" AS NUMERIC(14,2)) AS loan_amount,
-            CAST("Loan_Amount_Term" AS INTEGER) AS loan_amount_term,
-            CAST("Credit_History" AS NUMERIC(2,1)) AS credit_history,
-            NULLIF(TRIM("Property_Area"), '') AS property_area,
-            NULLIF(TRIM("Loan_Status"), '') AS loan_status,
-            CURRENT_TIMESTAMP AS ingested_at,
-            CAST(:run_id AS UUID) AS run_id,
-            :source_file AS source_file,
-            '2.0.0' AS pipeline_version
-        FROM bronze.loan_applications
-        ORDER BY "Loan_ID";
-        ALTER TABLE silver.loan_applications ADD PRIMARY KEY (loan_id);
-
-        CREATE SCHEMA IF NOT EXISTS quarantine;
-        DROP TABLE IF EXISTS quarantine.loan_applications_invalid;
-        CREATE TABLE quarantine.loan_applications_invalid AS
-        SELECT *, CASE
-            WHEN applicant_income < 0 OR coapplicant_income < 0 THEN 'negative income'
-            WHEN loan_amount <= 0 THEN 'loan amount must be positive'
-            WHEN loan_amount_term <= 0 THEN 'loan term must be positive'
-            WHEN loan_status NOT IN ('Y', 'N') THEN 'invalid loan status'
-        END AS reason
-        FROM silver.loan_applications
-        WHERE applicant_income < 0 OR coapplicant_income < 0 OR loan_amount <= 0
-           OR loan_amount_term <= 0 OR loan_status NOT IN ('Y', 'N');
-    """
+    stage_schema = "silver_stage_" + uuid.UUID(run_id).hex
     with engine.begin() as connection:
+        schema = connection.dialect.identifier_preparer.quote_identifier(stage_schema)
+        sql = f"""
+            CREATE SCHEMA {schema};
+            CREATE TABLE {schema}.loan_applications AS
+            SELECT DISTINCT ON ("Loan_ID")
+                TRIM("Loan_ID") AS loan_id,
+                NULLIF(TRIM("Gender"), '') AS gender,
+                NULLIF(TRIM("Married"), '') AS married,
+                NULLIF(TRIM("Dependents"), '') AS dependents,
+                NULLIF(TRIM("Education"), '') AS education,
+                NULLIF(TRIM("Self_Employed"), '') AS self_employed,
+                CAST("ApplicantIncome" AS NUMERIC(14,2)) AS applicant_income,
+                CAST("CoapplicantIncome" AS NUMERIC(14,2)) AS coapplicant_income,
+                CAST("LoanAmount" AS NUMERIC(14,2)) AS loan_amount,
+                CAST("Loan_Amount_Term" AS INTEGER) AS loan_amount_term,
+                CAST("Credit_History" AS NUMERIC(2,1)) AS credit_history,
+                NULLIF(TRIM("Property_Area"), '') AS property_area,
+                NULLIF(TRIM("Loan_Status"), '') AS loan_status,
+                CURRENT_TIMESTAMP AS ingested_at,
+                CAST(:run_id AS UUID) AS run_id,
+                :source_file AS source_file,
+                '2.0.0' AS pipeline_version
+            FROM bronze.loan_applications
+            ORDER BY "Loan_ID";
+            ALTER TABLE {schema}.loan_applications ADD PRIMARY KEY (loan_id);
+
+            CREATE SCHEMA IF NOT EXISTS silver;
+            CREATE TABLE IF NOT EXISTS silver.loan_applications
+                (LIKE {schema}.loan_applications INCLUDING ALL);
+            TRUNCATE TABLE silver.loan_applications;
+            INSERT INTO silver.loan_applications SELECT * FROM {schema}.loan_applications;
+
+            CREATE SCHEMA IF NOT EXISTS quarantine;
+            CREATE TABLE IF NOT EXISTS quarantine.loan_applications_invalid AS
+            SELECT *, CAST(NULL AS TEXT) AS reason
+            FROM {schema}.loan_applications WHERE FALSE;
+            TRUNCATE TABLE quarantine.loan_applications_invalid;
+            INSERT INTO quarantine.loan_applications_invalid
+            SELECT *, CASE
+                WHEN applicant_income < 0 OR coapplicant_income < 0 THEN 'negative income'
+                WHEN loan_amount <= 0 THEN 'loan amount must be positive'
+                WHEN loan_amount_term <= 0 THEN 'loan term must be positive'
+                WHEN loan_status NOT IN ('Y', 'N') THEN 'invalid loan status'
+            END AS reason
+            FROM {schema}.loan_applications
+            WHERE applicant_income < 0 OR coapplicant_income < 0 OR loan_amount <= 0
+               OR loan_amount_term <= 0 OR loan_status NOT IN ('Y', 'N');
+            DROP TABLE {schema}.loan_applications;
+            DROP SCHEMA {schema};
+        """
         connection.execute(text(sql), {"run_id": run_id, "source_file": source_file})
         return connection.execute(text("SELECT COUNT(*) FROM silver.loan_applications")).scalar_one()
 
@@ -390,18 +402,52 @@ def enforce_quality_policy(checks: dict[str, bool], failure_mode: str) -> None:
         LOGGER.warning("Data quality checks failed under %s: %s", failure_mode, ", ".join(failed))
 
 
+def cleanup_gold_staging_schema(engine, staging_schema: str) -> None:
+    """Remove a candidate schema after its transaction has rolled back."""
+    schema = engine.dialect.identifier_preparer.quote_identifier(staging_schema)
+    with engine.begin() as connection:
+        for table in ("dim_applicant_profile", "dim_property_area", "dim_loan_status",
+                      "fact_loan_applications", "loan_approval_summary"):
+            connection.execute(text(f"DROP TABLE IF EXISTS {schema}.{table}"))
+        connection.execute(text(f"DROP SCHEMA IF EXISTS {schema}"))
+
+
 def publish_gold(connection, staging_schema: str) -> None:
-    """Replace all serving tables atomically in the caller's transaction."""
+    """Publish Gold atomically while preserving existing table objects."""
     schema = connection.dialect.identifier_preparer.quote_identifier(staging_schema)
     connection.execute(text("CREATE SCHEMA IF NOT EXISTS gold"))
-    # Drop dependents first. External dependencies deliberately block publication;
-    # rollback restores the previous Gold instead of deleting downstream objects.
-    for table in ("loan_approval_summary", "fact_loan_applications", "dim_loan_status",
-                  "dim_property_area", "dim_applicant_profile"):
-        connection.execute(text(f"DROP TABLE IF EXISTS gold.{table}"))
-    for table in ("dim_applicant_profile", "dim_property_area", "dim_loan_status",
-                  "fact_loan_applications", "loan_approval_summary"):
-        connection.execute(text(f"ALTER TABLE {schema}.{table} SET SCHEMA gold"))
+    target_tables = ("dim_applicant_profile", "dim_property_area", "dim_loan_status",
+                     "fact_loan_applications", "loan_approval_summary")
+    existing = connection.execute(text("""
+        SELECT COUNT(*) FROM information_schema.tables
+        WHERE table_schema = 'gold' AND table_name = 'fact_loan_applications'
+    """)).scalar_one()
+    if not existing:
+        # First publication moves the validated candidate tables into the serving schema.
+        for table in target_tables:
+            connection.execute(text(f"ALTER TABLE {schema}.{table} SET SCHEMA gold"))
+        connection.execute(text(f"DROP SCHEMA {schema}"))
+        return
+
+    target_count = connection.execute(text("""
+        SELECT COUNT(*) FROM information_schema.tables
+        WHERE table_schema = 'gold' AND table_name IN
+            ('dim_applicant_profile', 'dim_property_area', 'dim_loan_status',
+             'fact_loan_applications', 'loan_approval_summary')
+    """)).scalar_one()
+    if target_count != len(target_tables):
+        raise PipelineError("Gold schema is incomplete; refusing partial table publication")
+
+    # Truncate all related tables in one statement, preserving object identity,
+    # grants, indexes, constraints, and dependent views.
+    connection.execute(text("""
+        TRUNCATE TABLE gold.loan_approval_summary, gold.fact_loan_applications,
+            gold.dim_loan_status, gold.dim_property_area, gold.dim_applicant_profile;
+    """))
+    for table in target_tables:
+        connection.execute(text(f"INSERT INTO gold.{table} SELECT * FROM {schema}.{table}"))
+    for table in reversed(target_tables):
+        connection.execute(text(f"DROP TABLE {schema}.{table}"))
     connection.execute(text(f"DROP SCHEMA {schema}"))
 
 
@@ -420,6 +466,7 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
     pipeline_name = "medalloan_loan_applications"
     bronze_rows = silver_rows = gold_rows = 0
     run_started = False
+    staging_schema = None
     try:
         lock_connection = acquire_pipeline_lock(engine)
         ensure_control_tables(engine)
@@ -453,6 +500,8 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
                      "silver_rows": silver_rows, "gold_rows": gold_rows, "duration": duration})
         LOGGER.info("Pipeline completed run_id=%s bronze=%s silver=%s gold=%s", run_id, bronze_rows, silver_rows, gold_rows)
     except Exception as error:
+        if staging_schema is not None:
+            cleanup_gold_staging_schema(engine, staging_schema)
         if run_started:
             with engine.begin() as connection:
                 connection.execute(text("""
