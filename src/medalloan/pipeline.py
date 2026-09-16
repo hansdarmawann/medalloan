@@ -28,8 +28,6 @@ class DataQualityError(PipelineError):
     """Raised when a blocking data-quality rule fails."""
 
 
-QUALITY_FAILURE_MODE = os.getenv("QUALITY_FAILURE_MODE", "STOP").upper()
-QUALITY_RULE_VERSION = os.getenv("QUALITY_RULE_VERSION", "1.0.0")
 PIPELINE_SLA_SECONDS = int(os.getenv("PIPELINE_SLA_SECONDS", "3600"))
 REQUIRED_SOURCE_COLUMNS = {
     "Loan_ID", "Gender", "Married", "Dependents", "Education", "Self_Employed",
@@ -224,79 +222,83 @@ def run_silver(engine, run_id: str, source_file: str = "loan_data_parts") -> int
         return connection.execute(text("SELECT COUNT(*) FROM silver.loan_applications")).scalar_one()
 
 
-def run_gold(engine) -> int:
-    sql = """
-        CREATE SCHEMA IF NOT EXISTS gold;
-        DROP TABLE IF EXISTS gold.loan_approval_summary;
-        DROP TABLE IF EXISTS gold.fact_loan_applications;
-        DROP TABLE IF EXISTS gold.dim_loan_status;
-        DROP TABLE IF EXISTS gold.dim_property_area;
-        DROP TABLE IF EXISTS gold.dim_applicant_profile;
+def build_gold_candidate(connection, staging_schema: str) -> int:
+    """Build unpublished Gold tables inside the caller's transaction."""
+    schema = connection.dialect.identifier_preparer.quote_identifier(staging_schema)
+    sql = f"""
+        CREATE SCHEMA {schema};
 
-        CREATE TABLE gold.dim_applicant_profile AS
+        CREATE TABLE {schema}.dim_applicant_profile AS
         SELECT ROW_NUMBER() OVER (ORDER BY gender, married, dependents, education, self_employed)::INTEGER AS applicant_profile_key,
                gender, married, dependents, education, self_employed
         FROM (SELECT DISTINCT gender, married, dependents, education, self_employed
               FROM silver.loan_applications) profiles;
-        ALTER TABLE gold.dim_applicant_profile ADD PRIMARY KEY (applicant_profile_key);
+        ALTER TABLE {schema}.dim_applicant_profile ADD PRIMARY KEY (applicant_profile_key);
 
-        CREATE TABLE gold.dim_property_area AS
+        CREATE TABLE {schema}.dim_property_area AS
         SELECT ROW_NUMBER() OVER (ORDER BY property_area)::INTEGER AS property_area_key, property_area
         FROM (SELECT DISTINCT property_area FROM silver.loan_applications) areas;
-        ALTER TABLE gold.dim_property_area ADD PRIMARY KEY (property_area_key);
-        ALTER TABLE gold.dim_property_area ADD CONSTRAINT uq_property_area UNIQUE (property_area);
+        ALTER TABLE {schema}.dim_property_area ADD PRIMARY KEY (property_area_key);
+        ALTER TABLE {schema}.dim_property_area ADD CONSTRAINT uq_property_area UNIQUE (property_area);
 
-        CREATE TABLE gold.dim_loan_status AS
+        CREATE TABLE {schema}.dim_loan_status AS
         SELECT ROW_NUMBER() OVER (ORDER BY loan_status)::INTEGER AS loan_status_key, loan_status,
                CASE loan_status WHEN 'Y' THEN 'Approved' WHEN 'N' THEN 'Rejected' ELSE 'Unknown' END AS status_label
         FROM (SELECT DISTINCT loan_status FROM silver.loan_applications) statuses;
-        ALTER TABLE gold.dim_loan_status ADD PRIMARY KEY (loan_status_key);
-        ALTER TABLE gold.dim_loan_status ADD CONSTRAINT uq_loan_status UNIQUE (loan_status);
+        ALTER TABLE {schema}.dim_loan_status ADD PRIMARY KEY (loan_status_key);
+        ALTER TABLE {schema}.dim_loan_status ADD CONSTRAINT uq_loan_status UNIQUE (loan_status);
 
-        CREATE TABLE gold.fact_loan_applications AS
+        CREATE TABLE {schema}.fact_loan_applications AS
         SELECT s.loan_id, p.applicant_profile_key, a.property_area_key, st.loan_status_key,
                s.applicant_income, s.coapplicant_income, s.loan_amount, s.loan_amount_term,
                s.credit_history, s.run_id, s.ingested_at
         FROM silver.loan_applications s
-        JOIN gold.dim_applicant_profile p ON (p.gender, p.married, p.dependents, p.education, p.self_employed)
+        JOIN {schema}.dim_applicant_profile p ON (p.gender, p.married, p.dependents, p.education, p.self_employed)
             IS NOT DISTINCT FROM (s.gender, s.married, s.dependents, s.education, s.self_employed)
-        LEFT JOIN gold.dim_property_area a ON a.property_area IS NOT DISTINCT FROM s.property_area
-        LEFT JOIN gold.dim_loan_status st ON st.loan_status IS NOT DISTINCT FROM s.loan_status;
-        ALTER TABLE gold.fact_loan_applications ADD PRIMARY KEY (loan_id);
-        ALTER TABLE gold.fact_loan_applications ADD CONSTRAINT fk_loan_profile FOREIGN KEY (applicant_profile_key)
-            REFERENCES gold.dim_applicant_profile(applicant_profile_key);
-        ALTER TABLE gold.fact_loan_applications ADD CONSTRAINT fk_loan_area FOREIGN KEY (property_area_key)
-            REFERENCES gold.dim_property_area(property_area_key);
-        ALTER TABLE gold.fact_loan_applications ADD CONSTRAINT fk_loan_status FOREIGN KEY (loan_status_key)
-            REFERENCES gold.dim_loan_status(loan_status_key);
+        LEFT JOIN {schema}.dim_property_area a ON a.property_area IS NOT DISTINCT FROM s.property_area
+        LEFT JOIN {schema}.dim_loan_status st ON st.loan_status IS NOT DISTINCT FROM s.loan_status;
+        ALTER TABLE {schema}.fact_loan_applications ADD PRIMARY KEY (loan_id);
+        ALTER TABLE {schema}.fact_loan_applications ADD CONSTRAINT fk_loan_profile FOREIGN KEY (applicant_profile_key)
+            REFERENCES {schema}.dim_applicant_profile(applicant_profile_key);
+        ALTER TABLE {schema}.fact_loan_applications ADD CONSTRAINT fk_loan_area FOREIGN KEY (property_area_key)
+            REFERENCES {schema}.dim_property_area(property_area_key);
+        ALTER TABLE {schema}.fact_loan_applications ADD CONSTRAINT fk_loan_status FOREIGN KEY (loan_status_key)
+            REFERENCES {schema}.dim_loan_status(loan_status_key);
 
-        CREATE TABLE gold.loan_approval_summary AS
+        CREATE TABLE {schema}.loan_approval_summary AS
         SELECT a.property_area, st.loan_status, COUNT(*) AS application_count,
                ROUND(AVG(f.loan_amount), 2) AS average_loan_amount,
                ROUND(AVG(f.applicant_income + f.coapplicant_income), 2) AS average_total_income
-        FROM gold.fact_loan_applications f
-        LEFT JOIN gold.dim_property_area a USING (property_area_key)
-        LEFT JOIN gold.dim_loan_status st USING (loan_status_key)
+        FROM {schema}.fact_loan_applications f
+        LEFT JOIN {schema}.dim_property_area a USING (property_area_key)
+        LEFT JOIN {schema}.dim_loan_status st USING (loan_status_key)
         GROUP BY a.property_area, st.loan_status;
     """
-    with engine.begin() as connection:
-        connection.execute(text(sql))
-        return connection.execute(text("SELECT COUNT(*) FROM gold.fact_loan_applications")).scalar_one()
+    connection.execute(text(sql))
+    return connection.execute(text(f"SELECT COUNT(*) FROM {schema}.fact_loan_applications")).scalar_one()
 
 
-def validate(engine, silver_count: int, gold_count: int, run_id: str) -> None:
-    with engine.connect() as connection:
-        checks = {
-            "silver/gold row count": silver_count == gold_count,
-            "unique loan id": connection.execute(text("SELECT COUNT(*) = COUNT(DISTINCT loan_id) FROM gold.fact_loan_applications")).scalar_one(),
-            "valid loan measures": connection.execute(text("""
-                SELECT COUNT(*) = 0 FROM gold.fact_loan_applications
-                WHERE applicant_income < 0 OR coapplicant_income < 0 OR loan_amount <= 0 OR loan_amount_term <= 0
-            """)).scalar_one(),
-            "valid loan status": connection.execute(text("""
-                SELECT COUNT(*) = 0 FROM gold.dim_loan_status WHERE loan_status NOT IN ('Y', 'N')
-            """)).scalar_one(),
-        }
+def evaluate_gold_quality(connection, staging_schema: str,
+                          silver_count: int, gold_count: int) -> dict[str, bool]:
+    """Evaluate the existing rules on the uncommitted candidate tables."""
+    schema = connection.dialect.identifier_preparer.quote_identifier(staging_schema)
+    return {
+        "silver/gold row count": silver_count == gold_count,
+        "unique loan id": connection.execute(text(
+            f"SELECT COUNT(*) = COUNT(DISTINCT loan_id) FROM {schema}.fact_loan_applications"
+        )).scalar_one(),
+        "valid loan measures": connection.execute(text(f"""
+            SELECT COUNT(*) = 0 FROM {schema}.fact_loan_applications
+            WHERE applicant_income < 0 OR coapplicant_income < 0 OR loan_amount <= 0 OR loan_amount_term <= 0
+        """)).scalar_one(),
+        "valid loan status": connection.execute(text(f"""
+            SELECT COUNT(*) = 0 FROM {schema}.dim_loan_status WHERE loan_status NOT IN ('Y', 'N')
+        """)).scalar_one(),
+    }
+
+
+def record_quality_results(engine, run_id: str, checks: dict[str, bool], rule_version: str) -> None:
+    """Commit audit evidence independently so a rejected candidate cannot erase it."""
     with engine.begin() as connection:
         connection.execute(text("""
             INSERT INTO control.data_quality_results (run_id, rule_name, passed, rule_version)
@@ -304,12 +306,30 @@ def validate(engine, silver_count: int, gold_count: int, run_id: str) -> None:
             ON CONFLICT (run_id, rule_name) DO UPDATE SET passed = EXCLUDED.passed,
                 rule_version = EXCLUDED.rule_version, checked_at = CURRENT_TIMESTAMP
         """), [{"run_id": run_id, "rule_name": name, "passed": passed,
-                  "rule_version": QUALITY_RULE_VERSION} for name, passed in checks.items()])
+                  "rule_version": rule_version} for name, passed in checks.items()])
+
+
+def enforce_quality_policy(checks: dict[str, bool], failure_mode: str) -> None:
     failed = [name for name, passed in checks.items() if not passed]
-    if failed and QUALITY_FAILURE_MODE == "STOP":
+    if failed and failure_mode == "STOP":
         raise DataQualityError("Data quality checks failed: " + ", ".join(failed))
     if failed:
-        LOGGER.warning("Data quality checks failed under %s: %s", QUALITY_FAILURE_MODE, ", ".join(failed))
+        LOGGER.warning("Data quality checks failed under %s: %s", failure_mode, ", ".join(failed))
+
+
+def publish_gold(connection, staging_schema: str) -> None:
+    """Replace all serving tables atomically in the caller's transaction."""
+    schema = connection.dialect.identifier_preparer.quote_identifier(staging_schema)
+    connection.execute(text("CREATE SCHEMA IF NOT EXISTS gold"))
+    # Drop dependents first. External dependencies deliberately block publication;
+    # rollback restores the previous Gold instead of deleting downstream objects.
+    for table in ("loan_approval_summary", "fact_loan_applications", "dim_loan_status",
+                  "dim_property_area", "dim_applicant_profile"):
+        connection.execute(text(f"DROP TABLE IF EXISTS gold.{table}"))
+    for table in ("dim_applicant_profile", "dim_property_area", "dim_loan_status",
+                  "fact_loan_applications", "loan_approval_summary"):
+        connection.execute(text(f"ALTER TABLE {schema}.{table} SET SCHEMA gold"))
+    connection.execute(text(f"DROP SCHEMA {schema}"))
 
 
 def run(source_path: Path, start_date=None, end_date=None, replay=False,
@@ -334,10 +354,14 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
             """), {"run_id": run_id, "pipeline_name": pipeline_name, "started_at": started_at})
         bronze_rows = run_bronze(engine, source_path, load_mode, run_id, chunk_size, throttle_ms)
         silver_rows = run_silver(engine, run_id)
-        gold_rows = run_gold(engine)
-        validate(engine, silver_rows, gold_rows, run_id)
-        finished_at = datetime.now(timezone.utc)
+        staging_schema = "gold_stage_" + uuid.UUID(run_id).hex
         with engine.begin() as connection:
+            gold_rows = build_gold_candidate(connection, staging_schema)
+            checks = evaluate_gold_quality(connection, staging_schema, silver_rows, gold_rows)
+            record_quality_results(engine, run_id, checks, settings.quality_rule_version)
+            enforce_quality_policy(checks, settings.quality_failure_mode)
+            publish_gold(connection, staging_schema)
+            finished_at = datetime.now(timezone.utc)
             duration = (finished_at - started_at).total_seconds()
             connection.execute(text("""
                 UPDATE control.pipeline_runs SET finished_at = :finished_at, status = 'SUCCESS',

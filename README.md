@@ -19,10 +19,40 @@ The eight dataset parts are stored in `data/` as `loan_data_01.csv` through `loa
 ## Current architecture
 
 ```text
-CSV -> Bronze -> Silver -> Gold -> Control / Quarantine / BI
+CSV -> Bronze -> Silver -> Gold candidate -> Quality gate -> Gold / BI
+                            |                    |
+                       Run staging        Control / quality audit
 ```
 
 The pipeline provides `full`, `append`, `upsert`, and `snapshot` ingestion; contract validation, `Loan_ID` deduplication, snapshot-diff CDC, quality checks, operational metrics, and a DAG runner with retries, timeouts, and resource pools. Gold contains applicant-profile, property-area, and loan-status dimensions, an application fact table, and an approval summary.
+
+### Gold publication and rollback
+
+Each run builds candidate Gold tables in a unique `gold_stage_<run_id>` schema.
+The four quality checks (Silver/Gold row counts, unique loan IDs, valid loan
+measures, and valid loan status) run against that candidate before publication.
+With `QUALITY_FAILURE_MODE=STOP` (the default), a failed check rejects the
+candidate and preserves every previously published Gold table. On a failed
+first run, no Gold tables are published. Bronze and Silver retain the latest
+input and transformation for investigation.
+
+Gold table replacement, the `SUCCESS` status, and success metrics commit in one
+PostgreSQL transaction. A publication error rolls them all back. Quality results
+are committed separately to `control.data_quality_results`, so they survive a
+rollback; `FAILED` is recorded after rollback. Staging schemas are removed on
+success or rolled back on failure. A passing quality audit alone does not prove
+publication succeeded; also check `control.pipeline_runs.status`.
+
+The gate uses `QUALITY_FAILURE_MODE` and `QUALITY_RULE_VERSION` from runtime
+settings, including `.env`. `WARN` and `QUARANTINE` currently both log failed
+checks and allow publication; invalid rows are still copied to quarantine by
+the Silver step, without being excluded from Gold. This change does not add
+row filtering, new NULL rules, or support for concurrent pipeline runs.
+
+Publication still replaces tables. External views or foreign keys depending on
+Gold can block replacement; the pipeline does not use `CASCADE`, and rolls back
+instead of removing those dependencies. Custom table grants are not preserved
+by replacement and must be managed separately.
 
 ## Repository structure
 
@@ -134,19 +164,27 @@ python scripts\run_orchestrator.py --inject-failure
 
 ### 5. Run the tests
 
-Run the unit tests:
+Run the tests that do not require PostgreSQL:
 
 ```cmd
+python -m pytest tests -p no:cacheprovider -q -m "not integration"
+```
+
+These cover configuration, the source contract, dataset regression, and retries.
+To also run PostgreSQL integration tests:
+
+```cmd
+set RUN_POSTGRES_INTEGRATION=1
 python -m pytest tests -p no:cacheprovider -q
 ```
 
-Expected output:
-
-```text
-4 passed
-```
-
-The tests verify the loan dataset contract and orchestrator retry behavior. The full pipeline test requires a running PostgreSQL database.
+The PostgreSQL user needs `CREATEDB` permission for publication tests. Each test
+creates a uniquely named `medalloan_test_<uuid>` database and drops only that
+database during teardown; publication tests never write to the configured
+application database. They verify valid publication, rejected candidates,
+first-run failures, rollback during table replacement and success recording,
+durable quality audits, and nonblocking policies. CI runs this suite against
+its PostgreSQL service.
 
 ### 6. Verify the database output
 
