@@ -7,3 +7,4 @@ matplotlib
 python-dotenv
 pytest
 jupyterlab
+uuid6

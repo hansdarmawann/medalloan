@@ -9,8 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from retailion.orchestrator import DAG, Task  # noqa: E402
-from retailion.pipeline import run  # noqa: E402
+from medalloan.orchestrator import DAG, Task  # noqa: E402
+from medalloan.pipeline import run  # noqa: E402
 
 
 def build_dag(args) -> DAG:

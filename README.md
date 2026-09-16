@@ -31,7 +31,7 @@ data/archived/loan_data.csv     # Archived source dataset
 scripts/create_database.py      # Create the database if missing
 scripts/run_pipeline.py         # Run the pipeline
 scripts/run_orchestrator.py     # Run the lightweight DAG
-src/retailion/                  # Pipeline and configuration code
+src/medalloan/                  # Pipeline and configuration code
 tests/                          # Contract and orchestrator tests
 ```
 

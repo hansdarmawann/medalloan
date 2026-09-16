@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from retailion.pipeline import REQUIRED_SOURCE_COLUMNS, validate_source_schema
+from medalloan.pipeline import REQUIRED_SOURCE_COLUMNS, validate_source_schema
 
 
 def test_source_contract_accepts_required_columns():

@@ -6,8 +6,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from retailion.config import ConfigurationError  # noqa: E402
-from retailion.pipeline import PipelineError, run  # noqa: E402
+from medalloan.config import ConfigurationError  # noqa: E402
+from medalloan.pipeline import PipelineError, run  # noqa: E402
 
 
 def main() -> int:

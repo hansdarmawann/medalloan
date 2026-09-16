@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import psycopg2  # noqa: E402
 from psycopg2 import sql  # noqa: E402
 
-from retailion.config import Settings  # noqa: E402
+from medalloan.config import Settings  # noqa: E402
 
 
 def create_database_if_missing(settings: Settings) -> None:

@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from retailion.orchestrator import DAG, Task
+from medalloan.orchestrator import DAG, Task
 
 
 def test_controlled_failure_recovers_on_retry():
