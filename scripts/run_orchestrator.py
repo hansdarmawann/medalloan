@@ -51,7 +51,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Medalloan orchestration DAG")
     parser.add_argument("--source", type=Path, default=ROOT / "data",
                         help="A loan CSV file or directory containing loan_data_*.csv files")
-    parser.add_argument("--mode", choices=("full", "append", "upsert", "snapshot"), default="full")
+    parser.add_argument(
+        "--mode", choices=("full", "append", "upsert", "snapshot"), default="full",
+        help=("Bronze ingestion mode: full replaces all rows; append inserts new IDs only; "
+              "upsert inserts or replaces by ID; snapshot retains history and replaces current rows"),
+    )
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--replay", action="store_true")

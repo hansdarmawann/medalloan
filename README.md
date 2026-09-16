@@ -26,6 +26,22 @@ CSV -> Bronze -> Silver -> Gold candidate -> Quality gate -> Gold / BI
 
 The pipeline provides `full`, `append`, `upsert`, and `snapshot` ingestion; contract validation, `Loan_ID` deduplication, snapshot-diff CDC, quality checks, operational metrics, and a DAG runner with retries, timeouts, and resource pools. Gold contains applicant-profile, property-area, and loan-status dimensions, an application fact table, and an approval summary.
 
+### Ingestion modes
+
+- `full` replaces the current Bronze table with the incoming dataset.
+- `append` inserts only previously unseen `Loan_ID` values. Existing rows are
+  left unchanged, even when the incoming values differ, so rerunning the same
+  batch is idempotent.
+- `upsert` inserts new IDs and replaces existing rows with their incoming
+  values.
+- `snapshot` stores the incoming dataset in snapshot history and also replaces
+  the current Bronze table.
+
+CDC records only applied operations: append runs emit `INSERT` events for new
+IDs and no `UPDATE` events, while upsert runs emit both inserts and changed
+updates. The `bronze_rows` metric represents the resulting Bronze table size,
+which keeps it comparable with Silver and Gold row counts.
+
 ### Gold publication and rollback
 
 Each run builds candidate Gold tables in a unique `gold_stage_<run_id>` schema.

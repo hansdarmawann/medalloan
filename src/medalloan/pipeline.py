@@ -152,6 +152,9 @@ def run_bronze(engine, source_path: Path, load_mode: str = "full", run_id: str |
                 WHERE NOT EXISTS (SELECT 1 FROM bronze.loan_applications current
                                   WHERE current."Loan_ID" = incoming."Loan_ID")
                 ON CONFLICT DO NOTHING;
+            """), {"run_id": run_id})
+        if run_id and load_mode != "append":
+            connection.execute(text("""
                 INSERT INTO control.cdc_events (run_id, loan_id, operation)
                 SELECT :run_id, incoming."Loan_ID", 'UPDATE'
                 FROM bronze.loan_applications_stage incoming
@@ -164,17 +167,33 @@ def run_bronze(engine, source_path: Path, load_mode: str = "full", run_id: str |
             snapshot.to_sql("loan_application_snapshots", engine, schema="bronze", if_exists="append", index=False)
         if load_mode in {"full", "snapshot"}:
             connection.execute(text("TRUNCATE TABLE bronze.loan_applications"))
-        else:
+            connection.execute(text("""
+                INSERT INTO bronze.loan_applications SELECT * FROM bronze.loan_applications_stage;
+            """))
+        elif load_mode == "append":
+            connection.execute(text("""
+                INSERT INTO bronze.loan_applications
+                SELECT incoming.*
+                FROM bronze.loan_applications_stage incoming
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM bronze.loan_applications current
+                    WHERE current."Loan_ID" = incoming."Loan_ID"
+                );
+            """))
+        else:  # upsert
             connection.execute(text("""
                 DELETE FROM bronze.loan_applications current
                 USING bronze.loan_applications_stage incoming
                 WHERE current."Loan_ID" = incoming."Loan_ID"
             """))
-        connection.execute(text("""
-            INSERT INTO bronze.loan_applications SELECT * FROM bronze.loan_applications_stage;
-            DROP TABLE bronze.loan_applications_stage;
-        """))
-    return len(frame)
+            connection.execute(text("""
+                INSERT INTO bronze.loan_applications SELECT * FROM bronze.loan_applications_stage;
+            """))
+        bronze_count = connection.execute(text(
+            "SELECT COUNT(*) FROM bronze.loan_applications"
+        )).scalar_one()
+        connection.execute(text("DROP TABLE bronze.loan_applications_stage"))
+    return bronze_count
 
 
 def run_silver(engine, run_id: str, source_file: str = "loan_data_parts") -> int:

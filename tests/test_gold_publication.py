@@ -242,3 +242,65 @@ def test_nonblocking_policy_uses_runtime_settings_and_publishes(
             SELECT COUNT(*) FROM gold.fact_loan_applications WHERE applicant_income < 0
         """)).scalar_one() == 1
     assert_no_staging(isolated_database)
+
+
+def test_append_inserts_only_new_ids_and_is_idempotent(isolated_database, source_csv):
+    pipeline.run(source_csv)
+    frame = pd.read_csv(source_csv)
+    existing_id = frame.loc[0, "Loan_ID"]
+    original_income = int(frame.loc[0, "ApplicantIncome"])
+    frame.loc[0, "ApplicantIncome"] = original_income + 1000
+    new_row = frame.iloc[[1]].copy()
+    new_row["Loan_ID"] = "LP_TEST_APPEND"
+    batch = pd.concat([frame, new_row], ignore_index=True)
+    batch.to_csv(source_csv, index=False)
+
+    pipeline.run(source_csv, load_mode="append")
+    append_run = latest_run(isolated_database)
+    assert append_run["status"] == "SUCCESS"
+    assert append_run["bronze_rows"] == append_run["silver_rows"] == append_run["gold_rows"] == 49
+    with isolated_database.connect() as connection:
+        assert connection.execute(text("""
+            SELECT "ApplicantIncome" FROM bronze.loan_applications WHERE "Loan_ID" = :loan_id
+        """), {"loan_id": existing_id}).scalar_one() == original_income
+        assert connection.execute(text("""
+            SELECT operation, loan_id FROM control.cdc_events
+            WHERE run_id = :run_id ORDER BY operation, loan_id
+        """), {"run_id": append_run["run_id"]}).all() == [("INSERT", "LP_TEST_APPEND")]
+
+    pipeline.run(source_csv, load_mode="append")
+    repeated_run = latest_run(isolated_database)
+    with isolated_database.connect() as connection:
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM bronze.loan_applications"
+        )).scalar_one() == 49
+        assert connection.execute(text("""
+            SELECT COUNT(*) FROM control.cdc_events WHERE run_id = :run_id
+        """), {"run_id": repeated_run["run_id"]}).scalar_one() == 0
+
+
+def test_upsert_updates_existing_ids_and_inserts_new_ids(isolated_database, source_csv):
+    pipeline.run(source_csv)
+    frame = pd.read_csv(source_csv)
+    existing_id = frame.loc[0, "Loan_ID"]
+    updated_income = int(frame.loc[0, "ApplicantIncome"]) + 1000
+    frame.loc[0, "ApplicantIncome"] = updated_income
+    new_row = frame.iloc[[1]].copy()
+    new_row["Loan_ID"] = "LP_TEST_UPSERT"
+    pd.concat([frame, new_row], ignore_index=True).to_csv(source_csv, index=False)
+
+    pipeline.run(source_csv, load_mode="upsert")
+    upsert_run = latest_run(isolated_database)
+    assert upsert_run["status"] == "SUCCESS"
+    assert upsert_run["bronze_rows"] == upsert_run["silver_rows"] == upsert_run["gold_rows"] == 49
+    with isolated_database.connect() as connection:
+        assert connection.execute(text("""
+            SELECT "ApplicantIncome" FROM bronze.loan_applications WHERE "Loan_ID" = :loan_id
+        """), {"loan_id": existing_id}).scalar_one() == updated_income
+        assert connection.execute(text("""
+            SELECT operation, loan_id FROM control.cdc_events
+            WHERE run_id = :run_id ORDER BY operation, loan_id
+        """), {"run_id": upsert_run["run_id"]}).all() == [
+            ("INSERT", "LP_TEST_UPSERT"),
+            ("UPDATE", existing_id),
+        ]
