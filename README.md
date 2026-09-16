@@ -63,12 +63,26 @@ The gate uses `QUALITY_FAILURE_MODE` and `QUALITY_RULE_VERSION` from runtime
 settings, including `.env`. `WARN` and `QUARANTINE` currently both log failed
 checks and allow publication; invalid rows are still copied to quarantine by
 the Silver step, without being excluded from Gold. This change does not add
-row filtering, new NULL rules, or support for concurrent pipeline runs.
+row filtering or new NULL rules.
 
 Publication still replaces tables. External views or foreign keys depending on
 Gold can block replacement; the pipeline does not use `CASCADE`, and rolls back
 instead of removing those dependencies. Custom table grants are not preserved
 by replacement and must be managed separately.
+
+### Concurrent-run protection
+
+Bronze, Silver, and Gold are shared tables, so one PostgreSQL database accepts
+one Medalloan pipeline run at a time. Each run obtains a database advisory lock
+before it creates control tables or changes warehouse data. A second run fails
+immediately with a retryable `PipelineError`; it does not create a run record or
+change any layer. The lock is released when the active run completes, fails, or
+its database session closes.
+
+Bronze staging tables are named `loan_applications_stage_<run_id>` and removed
+after use. This prevents one run from reusing or deleting another run's staging
+data, while the advisory lock preserves a consistent view across Bronze, Silver,
+quality validation, and Gold publication.
 
 ## Repository structure
 

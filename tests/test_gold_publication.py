@@ -98,6 +98,10 @@ def assert_no_staging(engine):
         assert connection.execute(text("""
             SELECT COUNT(*) FROM pg_namespace WHERE left(nspname, 11) = 'gold_stage_'
         """)).scalar_one() == 0
+        assert connection.execute(text("""
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'bronze' AND table_name LIKE 'loan_applications_stage_%'
+        """)).scalar_one() == 0
 
 
 def assert_failed_without_metrics(engine):
@@ -304,3 +308,23 @@ def test_upsert_updates_existing_ids_and_inserts_new_ids(isolated_database, sour
             ("INSERT", "LP_TEST_UPSERT"),
             ("UPDATE", existing_id),
         ]
+
+
+def test_active_pipeline_lock_rejects_a_second_run_without_mutating_layers(
+    isolated_database, source_csv,
+):
+    pipeline.run(source_csv)
+    before = gold_snapshot(isolated_database)
+    lock_connection = pipeline.acquire_pipeline_lock(isolated_database)
+    try:
+        with pytest.raises(pipeline.PipelineError, match="pipeline run is active"):
+            pipeline.run(source_csv, load_mode="upsert")
+    finally:
+        pipeline.release_pipeline_lock(lock_connection)
+
+    assert gold_snapshot(isolated_database) == before
+    assert_no_staging(isolated_database)
+    with isolated_database.connect() as connection:
+        assert connection.execute(text(
+            "SELECT COUNT(*) FROM control.pipeline_runs"
+        )).scalar_one() == 1

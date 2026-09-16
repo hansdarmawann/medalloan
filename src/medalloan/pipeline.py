@@ -29,6 +29,7 @@ class DataQualityError(PipelineError):
 
 
 PIPELINE_SLA_SECONDS = int(os.getenv("PIPELINE_SLA_SECONDS", "3600"))
+PIPELINE_ADVISORY_LOCK_KEY = 7_137_620_241
 REQUIRED_SOURCE_COLUMNS = {
     "Loan_ID", "Gender", "Married", "Dependents", "Education", "Self_Employed",
     "ApplicantIncome", "CoapplicantIncome", "LoanAmount", "Loan_Amount_Term",
@@ -48,6 +49,41 @@ def new_run_id() -> str:
     value = (timestamp_ms << 80) | (0x7 << 76) | secrets.randbits(76)
     value = (value & ~(0b11 << 62)) | (0b10 << 62)
     return str(uuid.UUID(int=value))
+
+
+def bronze_stage_table_name(run_id: str | None) -> str:
+    """Return a per-run Bronze staging table name safe for PostgreSQL identifiers."""
+    suffix = uuid.UUID(run_id).hex if run_id else uuid.uuid4().hex
+    return f"loan_applications_stage_{suffix}"
+
+
+def acquire_pipeline_lock(engine):
+    """Reserve this database's shared warehouse tables for one pipeline run."""
+    connection = engine.connect()
+    try:
+        acquired = connection.execute(text("""
+            SELECT pg_try_advisory_lock(:lock_key)
+        """), {"lock_key": PIPELINE_ADVISORY_LOCK_KEY}).scalar_one()
+        if not acquired:
+            raise PipelineError(
+                "Another Medalloan pipeline run is active for this database; retry after it completes"
+            )
+        return connection
+    except Exception:
+        connection.close()
+        raise
+
+
+def release_pipeline_lock(connection) -> None:
+    """Release a session-level lock and return its connection to the pool."""
+    try:
+        connection.execute(text("SELECT pg_advisory_unlock(:lock_key)"), {
+            "lock_key": PIPELINE_ADVISORY_LOCK_KEY,
+        })
+    except Exception:
+        LOGGER.exception("Could not explicitly release the pipeline advisory lock")
+    finally:
+        connection.close()
 
 
 def source_files(source_path: Path) -> list[Path]:
@@ -128,6 +164,7 @@ def run_bronze(engine, source_path: Path, load_mode: str = "full", run_id: str |
     frame["Loan_ID"] = frame["Loan_ID"].astype(str).str.strip()
     frame = frame.drop_duplicates(subset=["Loan_ID"], keep="last")
     ensure_control_tables(engine)
+    stage_table = bronze_stage_table_name(run_id)
     schema_columns = ",".join(frame.columns)
     with engine.begin() as connection:
         connection.execute(text("CREATE SCHEMA IF NOT EXISTS bronze"))
@@ -137,63 +174,69 @@ def run_bronze(engine, source_path: Path, load_mode: str = "full", run_id: str |
             ON CONFLICT (source_name) DO UPDATE SET schema_hash = EXCLUDED.schema_hash,
                 columns = EXCLUDED.columns, observed_at = CURRENT_TIMESTAMP
         """), {"schema_hash": source_hash, "columns": schema_columns})
-        connection.execute(text("DROP TABLE IF EXISTS bronze.loan_applications_stage"))
-    frame.to_sql("loan_applications_stage", engine, schema="bronze", if_exists="replace", index=False)
-    with engine.begin() as connection:
-        connection.execute(text("""
-            CREATE TABLE IF NOT EXISTS bronze.loan_applications
-                (LIKE bronze.loan_applications_stage INCLUDING DEFAULTS);
-        """))
-        if run_id:
-            connection.execute(text("""
-                INSERT INTO control.cdc_events (run_id, loan_id, operation)
-                SELECT :run_id, incoming."Loan_ID", 'INSERT'
-                FROM bronze.loan_applications_stage incoming
-                WHERE NOT EXISTS (SELECT 1 FROM bronze.loan_applications current
-                                  WHERE current."Loan_ID" = incoming."Loan_ID")
-                ON CONFLICT DO NOTHING;
-            """), {"run_id": run_id})
-        if run_id and load_mode != "append":
-            connection.execute(text("""
-                INSERT INTO control.cdc_events (run_id, loan_id, operation)
-                SELECT :run_id, incoming."Loan_ID", 'UPDATE'
-                FROM bronze.loan_applications_stage incoming
-                JOIN bronze.loan_applications current ON current."Loan_ID" = incoming."Loan_ID"
-                WHERE md5(row_to_json(current)::text) <> md5(row_to_json(incoming)::text)
-                ON CONFLICT DO NOTHING;
-            """), {"run_id": run_id})
-        if load_mode == "snapshot":
-            snapshot = frame.assign(snapshot_run_id=run_id, snapshot_at=datetime.now(timezone.utc))
-            snapshot.to_sql("loan_application_snapshots", engine, schema="bronze", if_exists="append", index=False)
-        if load_mode in {"full", "snapshot"}:
-            connection.execute(text("TRUNCATE TABLE bronze.loan_applications"))
-            connection.execute(text("""
-                INSERT INTO bronze.loan_applications SELECT * FROM bronze.loan_applications_stage;
+    try:
+        frame.to_sql(stage_table, engine, schema="bronze", if_exists="fail", index=False)
+        with engine.begin() as connection:
+            stage = connection.dialect.identifier_preparer.quote_identifier(stage_table)
+            connection.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS bronze.loan_applications
+                    (LIKE bronze.{stage} INCLUDING DEFAULTS);
             """))
-        elif load_mode == "append":
-            connection.execute(text("""
-                INSERT INTO bronze.loan_applications
-                SELECT incoming.*
-                FROM bronze.loan_applications_stage incoming
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM bronze.loan_applications current
+            if run_id:
+                connection.execute(text(f"""
+                    INSERT INTO control.cdc_events (run_id, loan_id, operation)
+                    SELECT :run_id, incoming."Loan_ID", 'INSERT'
+                    FROM bronze.{stage} incoming
+                    WHERE NOT EXISTS (SELECT 1 FROM bronze.loan_applications current
+                                      WHERE current."Loan_ID" = incoming."Loan_ID")
+                    ON CONFLICT DO NOTHING;
+                """), {"run_id": run_id})
+            if run_id and load_mode != "append":
+                connection.execute(text(f"""
+                    INSERT INTO control.cdc_events (run_id, loan_id, operation)
+                    SELECT :run_id, incoming."Loan_ID", 'UPDATE'
+                    FROM bronze.{stage} incoming
+                    JOIN bronze.loan_applications current ON current."Loan_ID" = incoming."Loan_ID"
+                    WHERE md5(row_to_json(current)::text) <> md5(row_to_json(incoming)::text)
+                    ON CONFLICT DO NOTHING;
+                """), {"run_id": run_id})
+            if load_mode == "snapshot":
+                snapshot = frame.assign(snapshot_run_id=run_id, snapshot_at=datetime.now(timezone.utc))
+                snapshot.to_sql("loan_application_snapshots", engine, schema="bronze", if_exists="append", index=False)
+            if load_mode in {"full", "snapshot"}:
+                connection.execute(text("TRUNCATE TABLE bronze.loan_applications"))
+                connection.execute(text(f"""
+                    INSERT INTO bronze.loan_applications SELECT * FROM bronze.{stage};
+                """))
+            elif load_mode == "append":
+                connection.execute(text(f"""
+                    INSERT INTO bronze.loan_applications
+                    SELECT incoming.*
+                    FROM bronze.{stage} incoming
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM bronze.loan_applications current
+                        WHERE current."Loan_ID" = incoming."Loan_ID"
+                    );
+                """))
+            else:  # upsert
+                connection.execute(text(f"""
+                    DELETE FROM bronze.loan_applications current
+                    USING bronze.{stage} incoming
                     WHERE current."Loan_ID" = incoming."Loan_ID"
-                );
-            """))
-        else:  # upsert
-            connection.execute(text("""
-                DELETE FROM bronze.loan_applications current
-                USING bronze.loan_applications_stage incoming
-                WHERE current."Loan_ID" = incoming."Loan_ID"
-            """))
-            connection.execute(text("""
-                INSERT INTO bronze.loan_applications SELECT * FROM bronze.loan_applications_stage;
-            """))
-        bronze_count = connection.execute(text(
-            "SELECT COUNT(*) FROM bronze.loan_applications"
-        )).scalar_one()
-        connection.execute(text("DROP TABLE bronze.loan_applications_stage"))
-    return bronze_count
+                """))
+                connection.execute(text(f"""
+                    INSERT INTO bronze.loan_applications SELECT * FROM bronze.{stage};
+                """))
+            bronze_count = connection.execute(text(
+                "SELECT COUNT(*) FROM bronze.loan_applications"
+            )).scalar_one()
+            connection.execute(text(f"DROP TABLE bronze.{stage}"))
+        return bronze_count
+    except Exception:
+        with engine.begin() as connection:
+            stage = connection.dialect.identifier_preparer.quote_identifier(stage_table)
+            connection.execute(text(f"DROP TABLE IF EXISTS bronze.{stage}"))
+        raise
 
 
 def run_silver(engine, run_id: str, source_file: str = "loan_data_parts") -> int:
@@ -360,17 +403,21 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
     settings = Settings.from_env()
     ensure_database_exists(settings)
     engine = create_db_engine(settings)
+    lock_connection = None
     run_id = new_run_id()
     started_at = datetime.now(timezone.utc)
     pipeline_name = "medalloan_loan_applications"
     bronze_rows = silver_rows = gold_rows = 0
+    run_started = False
     try:
+        lock_connection = acquire_pipeline_lock(engine)
         ensure_control_tables(engine)
         with engine.begin() as connection:
             connection.execute(text("""
                 INSERT INTO control.pipeline_runs (run_id, pipeline_name, started_at, status)
                 VALUES (:run_id, :pipeline_name, :started_at, 'STARTED')
             """), {"run_id": run_id, "pipeline_name": pipeline_name, "started_at": started_at})
+        run_started = True
         bronze_rows = run_bronze(engine, source_path, load_mode, run_id, chunk_size, throttle_ms)
         silver_rows = run_silver(engine, run_id)
         staging_schema = "gold_stage_" + uuid.UUID(run_id).hex
@@ -395,12 +442,15 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
                      "silver_rows": silver_rows, "gold_rows": gold_rows, "duration": duration})
         LOGGER.info("Pipeline completed run_id=%s bronze=%s silver=%s gold=%s", run_id, bronze_rows, silver_rows, gold_rows)
     except Exception as error:
-        with engine.begin() as connection:
-            connection.execute(text("""
-                UPDATE control.pipeline_runs SET finished_at = CURRENT_TIMESTAMP, status = 'FAILED',
-                    error_message = :error_message WHERE run_id = :run_id
-            """), {"run_id": run_id, "error_message": str(error)})
+        if run_started:
+            with engine.begin() as connection:
+                connection.execute(text("""
+                    UPDATE control.pipeline_runs SET finished_at = CURRENT_TIMESTAMP, status = 'FAILED',
+                        error_message = :error_message WHERE run_id = :run_id
+                """), {"run_id": run_id, "error_message": str(error)})
         LOGGER.exception("Pipeline failed run_id=%s", run_id)
         raise
     finally:
+        if lock_connection is not None:
+            release_pipeline_lock(lock_connection)
         engine.dispose()
