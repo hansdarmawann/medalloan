@@ -16,6 +16,7 @@ from sqlalchemy import text
 
 from .config import Settings
 from .database import create_db_engine, ensure_database_exists
+from .migrations import apply_migrations
 
 LOGGER = logging.getLogger(__name__)
 
@@ -470,6 +471,7 @@ def run(source_path: Path, start_date=None, end_date=None, replay=False,
     try:
         lock_connection = acquire_pipeline_lock(engine)
         ensure_control_tables(engine)
+        apply_migrations(engine)
         with engine.begin() as connection:
             connection.execute(text("""
                 INSERT INTO control.pipeline_runs (run_id, pipeline_name, started_at, status)

@@ -96,6 +96,7 @@ data/archived/loan_data.csv     # Archived source dataset
 scripts/create_database.py      # Create the database if missing
 scripts/run_pipeline.py         # Run the pipeline
 scripts/run_orchestrator.py     # Run the lightweight DAG
+migrations/                     # Ordered, checksum-tracked SQL migrations
 src/medalloan/                  # Pipeline and configuration code
 tests/                          # Contract and orchestrator tests
 ```
@@ -149,6 +150,21 @@ Create the database if it does not exist:
 ```cmd
 python scripts\create_database.py
 ```
+
+Apply database migrations explicitly before a deployment or after upgrading
+the repository:
+
+```cmd
+python scripts\migrate.py
+```
+
+Applied versions and SHA-256 checksums are stored in
+`control.schema_migrations`. An already applied migration cannot be edited;
+the runner stops and requires a new numbered migration. The pipeline acquires
+the same database advisory lock and applies pending migrations automatically,
+so a normal run remains safe when the explicit command was skipped. The
+current migrations initialize the ledger and add serving metadata columns to
+older Silver/Gold tables when those tables already exist.
 
 ### 3. Run the pipeline
 

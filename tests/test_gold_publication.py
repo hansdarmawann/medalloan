@@ -130,6 +130,9 @@ def test_valid_input_publishes_all_gold_tables_and_audit(isolated_database):
     assert all(gold_snapshot(engine).values())
     assert_quality_audit(engine, run["run_id"], [])
     with engine.connect() as connection:
+        assert connection.execute(text("""
+            SELECT version FROM control.schema_migrations ORDER BY version
+        """)).scalars().all() == ["001", "002"]
         metrics = dict(connection.execute(text("""
             SELECT metric_name, metric_value FROM control.pipeline_metrics WHERE run_id = :run_id
         """), {"run_id": run["run_id"]}).all())
