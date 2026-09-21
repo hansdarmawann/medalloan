@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/medalloan
-          cp -r src scripts migrations notebooks data README.md requirements.txt .env.example pytest.ini dist/medalloan/
+          cp -r src scripts migrations notebooks data README.md requirements.txt requirements-runtime.txt .env.example .dockerignore Dockerfile compose.yaml pytest.ini dist/medalloan/
           tar -czf "dist/medalloan-${GITHUB_REF_NAME}.tar.gz" -C dist medalloan
 
       - name: Upload release artifact

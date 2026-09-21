@@ -93,6 +93,9 @@ quality validation, and Gold publication.
 
 ```text
 data/archived/loan_data.csv     # Archived source dataset
+Dockerfile                      # Reproducible Python application image
+compose.yaml                    # PostgreSQL, pipeline, and integration-test services
+requirements-runtime.txt        # Minimal pipeline and container-test dependencies
 scripts/create_database.py      # Create the database if missing
 scripts/run_pipeline.py         # Run the pipeline
 scripts/run_orchestrator.py     # Run the lightweight DAG
@@ -101,7 +104,71 @@ src/medalloan/                  # Pipeline and configuration code
 tests/                          # Contract and orchestrator tests
 ```
 
-## How to run
+## Run with Docker
+
+Docker Compose provides PostgreSQL 16, the pipeline application, database
+health checks, persistent database storage, and an opt-in integration-test
+service. Docker Desktop must be running in Linux-container mode.
+
+Create the local environment file and change `DB_PASSWORD` before using the
+stack outside an isolated development machine:
+
+```cmd
+copy .env.example .env
+```
+
+Build the application image, start PostgreSQL, run the pipeline, and stop the
+stack when the pipeline exits:
+
+```cmd
+docker compose up --build --abort-on-container-exit --exit-code-from pipeline
+```
+
+PostgreSQL data remains in the `postgres_data` named volume. For repeated runs,
+the services can be managed independently:
+
+```cmd
+docker compose up -d postgres
+docker compose run --rm pipeline
+```
+
+Run the DAG orchestrator with the same image and database:
+
+```cmd
+docker compose run --rm pipeline python scripts/run_orchestrator.py --source /app/data
+```
+
+Run the complete test suite, including tests that create disposable PostgreSQL
+databases:
+
+```cmd
+docker compose --profile test run --build --rm tests
+```
+
+Stop the stack without deleting its database:
+
+```cmd
+docker compose down
+```
+
+To intentionally delete all local PostgreSQL data and start from an empty
+database, remove the named volume as well:
+
+```cmd
+docker compose down --volumes
+```
+
+PostgreSQL is published to `127.0.0.1:5434` by default so it does not clash
+with a native PostgreSQL installation or the Promptchived database. Application
+containers still connect to `postgres:5432`. Override `POSTGRES_HOST_PORT` in
+`.env` when another host port is preferred. To open an interactive database
+shell, run:
+
+```cmd
+docker compose exec postgres psql -U postgres -d medalloan
+```
+
+## Run without Docker
 
 ### Prerequisites
 
